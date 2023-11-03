@@ -15,7 +15,7 @@ Learning Roadmap
 
 ## RL algorithms
 
-![RL algorithms](asserts/rlalgos.png)
+![RL algorithms](assets/rlalgos.png)
 
 ---
 
