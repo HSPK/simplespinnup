@@ -11,6 +11,14 @@ def combined_shape(length, shape=None):
     return (length, shape) if np.isscalar(shape) else (length, *shape)
 
 
+def keys_as_sorted_list(dict):
+    return sorted(list(dict.keys()))
+
+
+def values_as_sorted_list(dict):
+    return [dict[k] for k in keys_as_sorted_list(dict)]
+
+
 def mlp(sizes, activation, output_activation=nn.Identity):
     layers = []
     for j in range(len(sizes) - 1):
@@ -99,6 +107,36 @@ class MLPCritic(nn.Module):
     def forward(self, obs):
         return self.v_net(obs).squeeze(dim=-1)
 
+
+class MlpDklActorCritic(nn.Module):
+    def __init__(
+        self,
+        observation_space: Space,
+        action_space,
+        hidden_sizes=[64, 64],
+        activation=nn.Tanh,
+    ):
+        super().__init__()
+
+        obs_dim = observation_space.shape[0]
+        if isinstance(action_space, Box):
+            self.pi = MLPGuassianActor(
+                obs_dim, action_space.shape[0], hidden_sizes, activation
+            )
+        elif isinstance(action_space, Discrete):
+            self.pi = MLPCategoricalActor(
+                obs_dim, action_space.n, hidden_sizes, activation
+            )
+        self.v = MLPCritic(obs_dim, hidden_sizes, activation)
+
+    def step(self, obs):
+        with torch.no_grad():
+            pi = self.pi._distribution(obs)
+            a = pi.sample()
+            logp_a = self.pi._log_prob_from_distribution(pi, a)
+            v = self.v(obs)
+        return a.numpy(), v.numpy(), logp_a.numpy()
+    
 
 class MLPActorCritic(nn.Module):
     def __init__(
