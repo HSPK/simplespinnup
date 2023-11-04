@@ -5,6 +5,12 @@ import core
 import gymnasium as gym
 import numpy as np
 import torch
+import logging
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 
 class VPGBuffer(object):
@@ -59,8 +65,8 @@ class VPGBuffer(object):
 
 
 def vpg(
-    env_fn: type(Env),
-    actor_critic: type(nn.Module),
+    env_fn,
+    actor_critic,
     ac_kwargs: dict,
     epoch: int,
     max_steps: int,
@@ -74,9 +80,10 @@ def vpg(
     env = env_fn()
     obs_dim = env.observation_space.shape
     act_dim = env.action_space.shape
+    logger.info(f"Observation space: {obs_dim}, Action space: {act_dim}")
 
     ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
-    buf = VPGBuffer(obs_dim, act_dim, epoch, gamma, lam)
+    buf = VPGBuffer(obs_dim, act_dim, max_steps, gamma, lam)
 
     var_counts = tuple(count_vars(module) for module in [ac.pi, ac.v])
     print("\nNumber of parameters: \t pi: %d, \t v: %d\n" % var_counts)
@@ -84,14 +91,10 @@ def vpg(
     optimizer_v = torch.optim.Adam(ac.v.parameters(), lr=vf_lr)
 
     def compute_loss_pi(data):
-        obs, act, adv, logp_old = data["obs"], data["act"], data["adv"], data["logp"]
-        pi, logp = ac.pi(obs, act)
+        obs, act, adv = data["obs"], data["act"], data["adv"]
+        _, logp = ac.pi(obs, act)
         loss_pi = -(logp * adv).mean()
-
-        approx_kl = (logp_old - logp).mean().item()
-        ent = pi.entropy().mean().item()
-        pi_info = dict(kl=approx_kl, ent=ent)
-        return loss_pi, pi_info
+        return loss_pi
 
     def compute_loss_v(data):
         obs, ret = data["obs"], data["ret"]
@@ -99,11 +102,9 @@ def vpg(
 
     def update():
         data = buf.get()
-        pi_l_old, pi_info_old = compute_loss_pi(data)
-        v_l_old = compute_loss_v(data)
 
         optimizer_pi.zero_grad()
-        loss_pi, pi_info = compute_loss_pi(data)
+        loss_pi = compute_loss_pi(data)
         loss_pi.backward()
         optimizer_pi.step()
 
@@ -113,15 +114,19 @@ def vpg(
             loss_v.backward()
             optimizer_v.step()
 
-        return loss_pi.item(), loss_v.item(), pi_info
+        return loss_pi.item(), loss_v.item()
 
-    o, ep_ret, ep_len = env.reset(), 0, 0
+    (o, o_info), ep_ret, ep_len = env.reset(), 0, 0
+    best_reward = -np.inf
     for epoch in range(epoch):
+        ep_rews = 0
+        episodes = 0
         for t in range(max_steps):
             a, v, logp = ac.step(torch.as_tensor(o, dtype=torch.float32))
             next_o, r, d, tructated, _ = env.step(a)
             ep_ret += r
             ep_len += 1
+            ep_rews += r
 
             buf.store(o, a, v, r, logp)
             o = next_o
@@ -142,25 +147,69 @@ def vpg(
                     else ac.step(torch.as_tensor(o, dtype=torch.float32))[1].item()
                 )
                 buf.finish_path(last_val)
-                o, ep_ret, ep_len = env.reset(), 0, 0
+                (o, o_info), ep_ret, ep_len = env.reset(), 0, 0
+                episodes += 1
 
-        loss_pi, loss_v, pi_info = update()
-        print(
-            f"Epoch: {epoch}, Loss_pi: {loss_pi}, Loss_v: {loss_v}, KL: {pi_info['kl']}, Entropy: {pi_info['ent']}"
+        loss_pi, loss_v = update()
+        ep_rews /= episodes
+        if ep_rews > best_reward:
+            best_reward = ep_rews
+            torch.save(ac.state_dict(), "vpg.pt")
+        logger.info(
+            f"Epoch: {epoch}, Loss pi: {loss_pi}, Loss v: {loss_v}, Reward: {ep_rews}"
         )
 
 
+def vpg_test(env_fn, actor_critic, ac_kwargs, test_epochs, model_path):
+    env = env_fn()
+    ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
+    ac.load_state_dict(torch.load(model_path))
+    ac.eval()
+
+    for epoch in range(test_epochs):
+        (o, o_info), ep_ret, ep_len = env.reset(), 0, 0
+        while True:
+            a, v, logp = ac.step(torch.as_tensor(o, dtype=torch.float32))
+            next_o, r, d, tructated, _ = env.step(a)
+            ep_ret += r
+            ep_len += 1
+            o = next_o
+            terminal = d or tructated
+            if terminal:
+                print(f"Epoch: {epoch}, Reward: {ep_ret}")
+                (o, o_info), ep_ret, ep_len = env.reset(), 0, 0
+                break
+        cmd = input("Continue? [y/n]")
+        if cmd == "n":
+            break
+
+
 if __name__ == "__main__":
-    vpg(
-        lambda: gym.make("HalfCheetah-v4"),
-        actor_critic=core.MLPActorCritic,
-        ac_kwargs=dict(hidden_sizes=[64, 64], activation=nn.Tanh),
-        epoch=50,
-        max_steps=5000,
-        max_ep_len=1000,
-        train_v_iters=80,
-        pi_lr=3e-4,
-        vf_lr=1e-3,
-        gamma=0.99,
-        lam=0.97,
-    )
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--test", action="store_true")
+    args = parser.parse_args()
+
+    if args.test:
+        vpg_test(
+            lambda: gym.make("LunarLander-v2", render_mode="human"),
+            actor_critic=core.MLPActorCritic,
+            ac_kwargs=dict(hidden_sizes=[64, 64], activation=nn.Tanh),
+            test_epochs=10,
+            model_path="vpg.pt",
+        )
+    else:
+        vpg(
+            lambda: gym.make("LunarLander-v2"),
+            actor_critic=core.MLPActorCritic,
+            ac_kwargs=dict(hidden_sizes=[64, 64], activation=nn.Tanh),
+            epoch=500,
+            max_steps=5000,
+            max_ep_len=1000,
+            train_v_iters=80,
+            pi_lr=3e-4,
+            vf_lr=1e-3,
+            gamma=0.99,
+            lam=0.97,
+        )

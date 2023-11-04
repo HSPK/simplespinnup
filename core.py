@@ -136,7 +136,7 @@ class MlpDklActorCritic(nn.Module):
             logp_a = self.pi._log_prob_from_distribution(pi, a)
             v = self.v(obs)
         return a.numpy(), v.numpy(), logp_a.numpy()
-    
+
 
 class MLPActorCritic(nn.Module):
     def __init__(
@@ -169,3 +169,54 @@ class MLPActorCritic(nn.Module):
 
     def act(self, obs):
         return self.step(obs)[0]
+
+
+class GAEBuffer(object):
+    def __init__(self, obs_dim: int, act_dim: int, size: int, gamma: float, lam: float):
+        self.obs_buf = np.zeros(combined_shape(size, obs_dim), dtype=np.float32)
+        self.act_buf = np.zeros(combined_shape(size, act_dim), dtype=np.float32)
+        self.logp_buf = np.zeros(size, dtype=np.float32)
+        self.val_buf = np.zeros(size, dtype=np.float32)
+        self.rew_buf = np.zeros(size, dtype=np.float32)
+        self.adv_buf = np.zeros(size, dtype=np.float32)
+        self.ret_buf = np.zeros(size, dtype=np.float32)
+        self.gamma, self.lam = gamma, lam
+        self.ptr, self.path_start_idx, self.max_size = 0, 0, size
+
+    def store(self, obs, act, val, rew, logp):
+        self.obs_buf[self.ptr] = obs
+        self.act_buf[self.ptr] = act
+        self.logp_buf[self.ptr] = logp
+        self.val_buf[self.ptr] = val
+        self.rew_buf[self.ptr] = rew
+        self.ptr += 1
+
+    def finish_path(self, last_val=0):
+        path_slice = slice(self.path_start_idx, self.ptr)
+        rews = np.append(self.rew_buf[path_slice], last_val)
+        vals = np.append(self.val_buf[path_slice], last_val)
+
+        # the next two lines implement GAE-Lambda advantage calculation
+        deltas = rews[:-1] + self.gamma * vals[1:] - vals[:-1]
+        self.adv_buf[path_slice] = discount_cumsum(deltas, self.gamma * self.lam)
+
+        # the next line computes rewards-to-go, to be targets for the value function
+        self.ret_buf[path_slice] = discount_cumsum(rews, self.gamma)[:-1]
+        self.path_start_idx = self.ptr
+
+    def get(self):
+        assert self.ptr == self.max_size
+        self.ptr, self.path_start_idx = 0, 0
+
+        # advantage normalization trick
+        adv_mean, adv_std = np.mean(self.adv_buf), np.std(self.adv_buf)
+        self.adv_buf = (self.adv_buf - adv_mean) / adv_std
+
+        ret = dict(
+            obs=self.obs_buf,
+            act=self.act_buf,
+            ret=self.ret_buf,
+            adv=self.adv_buf,
+            logp=self.logp_buf,
+        )
+        return {k: torch.as_tensor(v, dtype=torch.float32) for k, v in ret.items()}
