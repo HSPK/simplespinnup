@@ -64,6 +64,48 @@ class Actor(nn.Module):
         return pi, logp_a
 
 
+class MLPActor(nn.Module):
+    def __init__(self, obs_dim, act_dim, hidden_sizes, activation, act_limit) -> None:
+        super().__init__()
+        pi_sizes = [obs_dim] + list(hidden_sizes) + [act_dim]
+        self.pi = mlp(pi_sizes, activation, nn.Tanh)
+        self.act_limit = act_limit
+
+    def forward(self, obs):
+        return self.pi(obs) * self.act_limit
+
+
+class MLPQFunction(nn.Module):
+    def __init__(self, obs_dim, act_dim, hidden_sizes, activation) -> None:
+        super().__init__()
+        self.q = mlp([obs_dim + act_dim] + list(hidden_sizes) + [1], activation)
+
+    def forward(self, obs, act):
+        q = self.q(torch.cat([obs, act], dim=-1))
+        return torch.squeeze(q, -1)
+
+
+class MLPQActorCritic(nn.Module):
+    def __init__(
+        self,
+        observation_space,
+        action_space,
+        hidden_sizes=[256, 256],
+        activation=nn.ReLU,
+    ):
+        super().__init__()
+        obs_dim = observation_space.shape
+        act_dim = observation_space.shape[0]
+        act_limit = observation_space.hight[0]
+
+        self.pi = MLPActor(obs_dim, act_dim, hidden_sizes, activation, act_limit)
+        self.q = MLPQFunction(obs_dim, act_dim, hidden_sizes, activation)
+
+    def act(self, obs):
+        with torch.no_grad():
+            return self.pi(obs).numpy()
+
+
 class MLPCategoricalActor(Actor):
     def __init__(self, obs_dim, act_dim, hidden_sizes, activation):
         super().__init__()
