@@ -126,6 +126,7 @@ def ddpg(
             o, d, ep_ret, ep_len = test_env.reset()[0], False, 0, 0
             while not (d or (ep_len == max_ep_len)):
                 o, r, terminal, trunctated, _ = test_env.step(get_action(o, 0))
+                d = terminal or trunctated
             ep_ret += r
             ep_len += 1
         return ep_ret, ep_len
@@ -148,6 +149,8 @@ def ddpg(
             _,
         ) = env.step(a)
         d = terminal or trunctated
+        ep_ret += r
+        ep_len += 1
 
         d = False if ep_len == max_ep_len else d
 
